@@ -1,0 +1,69 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.1
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    # Pass your secrets into every Airflow container from your .env file
+    EIA_API_KEY: ${EIA_API_KEY}
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    AWS_REGION: ${AWS_REGION}
+    S3_BUCKET: ${S3_BUCKET}
+    SF_ACCOUNT: ${SF_ACCOUNT}
+    SF_USER: ${SF_USER}
+    SF_PASSWORD: ${SF_PASSWORD}
+    SF_WAREHOUSE: ${SF_WAREHOUSE}
+    SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE}
+    _PIP_ADDITIONAL_REQUIREMENTS: "snowflake-connector-python boto3"
+  volumes:
+    - ./dags:/opt/airflow/dags          # your DAG files
+    - ./src:/opt/airflow/src            # eia_client.py, s3_client.py
+    - ./sql:/opt/airflow/sql            # SQL transform scripts
+    - ./logs:/opt/airflow/logs          # task logs
+    - ./plugins:/opt/airflow/plugins    # custom operators (empty for now)
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    command: bash -c "airflow db migrate && airflow users create --username admin --password admin --firstname Himanshu --lastname Rajdev --role Admin --email hrajdev@wisc.edu"
+    restart: "no"   # runs once and exits
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      retries: 5
+
+volumes:
+  postgres_data:

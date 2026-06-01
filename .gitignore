@@ -1,0 +1,31 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Airflow
+logs/
+airflow.db
+airflow.cfg
+standalone_admin_password.txt
+
+# Tableau extracts
+*.hyper
+*.tde
+*.twbx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AWS
+.aws/
+
+# Jupyter
+.ipynb_checkpoints/

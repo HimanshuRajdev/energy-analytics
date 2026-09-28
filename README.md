@@ -1,6 +1,6 @@
 # US Energy Analytics Pipeline
 
-**Live Dashboard**: [Tableau Public](https://public.tableau.com/app/profile/himanshu.rajdev/viz/USEnergyAnalyticsDashboard/USEnergyAnalyticsDashboard20202026)
+**Live Dashboard**: [Tableau Public](https://public.tableau.com/app/profile/himanshu.rajdev/viz/USEnergyAnalyticsDashboard20202026/USEnergyAnalyticsDashboard20202026)
 
 ---
 

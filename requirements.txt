@@ -1,3 +1,5 @@
-snowflake-connector-python[pandas]
 boto3
-pandas
+requests
+google-cloud-bigquery
+python-dotenv
+google-auth

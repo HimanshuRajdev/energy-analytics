@@ -1,153 +1,177 @@
-# US Energy Analytics Pipeline
+# US Energy Analytics
 
-**Live Dashboard**: [Tableau Public](https://public.tableau.com/app/profile/himanshu.rajdev/viz/USEnergyAnalyticsDashboard20202026/USEnergyAnalyticsDashboard20202026)
+**Live dashboard** [US Energy Analytics Dashboard on Tableau Public](https://public.tableau.com/app/profile/himanshu.rajdev/viz/USEnergyAnalyticsDashboard20202026/USEnergyAnalyticsDashboard20202026)
+
+![US Energy Analytics Dashboard](docs/dashboard.png)
+
+A dashboard of US electricity from 2020 to 2026. It shows where power costs the most, which states had unusual price jumps, what the electricity is made from, and how much the biggest grid operators use hour by hour. All data comes from the US Energy Information Administration (EIA).
+
+Behind it is a pipeline that collects, cleans and refreshes the data on a schedule, so nothing is rebuilt by hand. The goal was something that runs end to end, not a notebook with a few charts.
 
 ---
 
-## What this is
+## The dashboard
 
-This project pulls data from the US Energy Information Administration (EIA) API, stores it in AWS S3, transforms it through Snowflake, and visualizes it in Tableau. The end result is a live dashboard covering US electricity prices, generation mix, grid demand, and price anomalies from 2020 through early 2026.The goal was to build something that actually runs end to end, not just a notebook with some charts.
+At the top are four headline numbers.
+
+- **Clean energy share** is renewables plus nuclear as a share of total generation.
+- **Average retail price** is in cents per kWh.
+- **Price spikes** counts state-months where the price ran more than 2 standard deviations above its 12-month average.
+- **Lower 48 average hourly demand** is in MWh.
+
+Below them are six charts.
+
+| Chart | What it shows |
+|---|---|
+| Average Retail Price by State | Map of cents per kWh, all sectors, lower 48. Click a state to filter the dashboard and click again to reset. |
+| Price Anomalies by State | Map of how many months each state spent above z = 2 since the selected start month. |
+| Generation Mix by Fuel | Stacked area of each fuel's share of generation by month (coal, hydro, natural gas, nuclear, solar and geothermal, wind, other). Follows the selected state. |
+| Monthly Price Z-Score | Line of the monthly price z-score against the 12-month rolling average, with the z = 2 threshold marked. |
+| Average Hourly Demand by Grid Operator | Bars for the 7 largest US grid operators (PJM, MISO, ERCOT, SPP, CAISO, NYISO, ISO-NE). Not filtered by state. |
+| Fossil vs Nuclear vs Renewable | Lines for each group's share of generation over time. Other is petroleum, biomass and miscellaneous. |
+
+A "Show data from" picker sets the start month. The headline numbers and the anomaly map follow it.
+
+**How a z-score works here.** For each state and month, the price is compared with the average and standard deviation of that state's last 12 months. A z-score above 2 means the price was unusually high for that state. The warehouse flags anything beyond 2.5 as an anomaly (`is_anomaly`) and the dashboard shows the 2.0 line.
 
 ---
 
-## Architecture
+## How it works
 
 ```
-EIA API -> S3 (raw JSON) -> Snowflake (RAW -> STAGING -> MARTS) -> Tableau
+EIA API -> S3 (raw JSON) -> BigQuery (raw -> staging -> marts) -> Google Sheet -> Tableau Public
+            Airflow in Docker runs the whole chain once a month
 ```
 
-Data flows daily through an Airflow pipeline. Raw JSON files land in S3, get loaded into Snowflake's RAW schema, transformed into clean STAGING tables via MERGE statements, and finally aggregated into MARTS that Tableau reads directly.
+1. **Ingest.** Three tasks pull retail prices, generation and hourly demand from the EIA API and save one gzipped JSON file per dataset per month in S3, at `raw/<dataset>/year=YYYY/month=MM/data.json.gz`.
+2. **Load.** The BigQuery `eia_raw` tables are cleared and reloaded from those files. Each record is stored as a JSON string, exactly as EIA sent it.
+3. **Staging.** SQL turns the JSON into typed columns, removes duplicates and upserts into `eia_staging` with `MERGE`.
+4. **Marts.** SQL builds the tables the dashboard reads in `eia_marts`, including the rolling z-scores and the fuel groupings.
+5. **Validate.** The run fails if any mart table is empty.
+6. **Publish.** Small versions of the marts are written to a Google Sheet. Tableau Public cannot connect to a database, but it refreshes workbooks that are connected to Google Sheets on its own.
+
+### Why each run re-pulls three months
+
+EIA publishes monthly retail and generation data about two months late, and it revises recent months. Asking only for the current month returns nothing. So every run re-pulls the last 3 months (`lookback_months`), overwrites those S3 files, and the merge step upserts any changes. Running it again is always safe.
+
+Hourly demand is large, so it is pulled one month at a time and saved as each month finishes. The client retries when EIA drops a connection.
+
+### What is in the Google Sheet
+
+| Tab | One row per | Feeds |
+|---|---|---|
+| `fact_retail_prices` | state and month | price maps, z-score line, spike count |
+| `fact_generation` | state, month and fuel category | generation mix, fossil vs nuclear vs renewable |
+| `fact_rto_heatmap` | month, hour of day and grid operator | demand views |
+| `fact_rto_regional` | month and grid operator | demand by grid operator |
+| `fact_anomaly_leaderboard` | state | anomaly counts |
+| `dim_state` | state | state names |
+
+Generation is rolled up from about 1.3 million fuel-code rows to one row per fuel category so it fits in a Sheet. Column headers are in capitals, and ID and period columns are forced to text so Sheets does not turn `2020-01` into a date.
 
 ---
 
-## Stack
+## Data
 
-- **Python 3.11** for API ingestion, S3 uploads, and Snowflake loading
-- **Apache Airflow 2.9.1** running locally via Docker Compose for orchestration
-- **AWS S3** for raw data storage
-- **Snowflake** for all transformation and analytics
-- **Tableau Desktop / Tableau Public** for visualization
+All three datasets come from the EIA Open Data API.
 
----
-
-## Data Sources
-
-All data comes from the EIA Open Data API (free, no rate limits with an API key).
-
-**Retail Electricity Prices** covers monthly prices across all US states and 6 customer sectors (residential, commercial, industrial, etc.) from 2020 to present. This dataset powers the price map and anomaly detection.
-
-**Generation by Fuel Type** covers monthly electricity generation broken down by fuel type for every state. This is the largest dataset at around 1.3 million staging rows. It powers the energy mix chart and the renewable vs fossil comparison.
-
-**RTO Demand** is hourly demand data from the major regional grid operators (MISO, PJM, ERCO, CISO, etc.). This is the heaviest dataset at around 15 million raw rows and powers the demand heatmap and regional comparison.
+- **Retail electricity prices** are monthly by state and sector from 2020. The marts keep the all-sectors rows.
+- **Generation by fuel** is monthly by state and fuel type.
+- **Hourly demand** is by balancing authority. The EIA endpoint returns four series for every region and hour (demand, day-ahead forecast, net generation and interchange). The pipeline keeps only demand (`type = D`).
 
 ---
 
-## Project Structure
+## Run it
+
+**Prerequisites** are Python 3.11, Docker, an EIA API key, an AWS account with an S3 bucket, and a Google Cloud project with billing linked.
+
+1. Copy `.env.example` to `.env` and fill it in. Save it with LF line endings.
+2. In Google Cloud, enable the BigQuery and Google Sheets APIs. Create a service account with the BigQuery Data Editor and BigQuery Job User roles and save its key as `secrets/gcp.json`.
+3. Share your Google Sheet with the service account email as Editor and put its ID in `.env` as `SHEET_ID`.
+4. Load everything already in S3 into BigQuery.
+   ```
+   pip install -r requirements.txt
+   python -m scripts.rebuild_from_s3 --start 2020-01
+   ```
+5. Catch up to today and fill the Sheet.
+   ```
+   python -m scripts.run_pipeline --lookback 9 --publish
+   ```
+6. Check every stage.
+   ```
+   python -m scripts.check_all
+   ```
+7. Start Airflow.
+   ```
+   docker compose up -d --build
+   ```
+   The UI is at `http://localhost:8080`. The DAG `eia_pipeline_dag` runs on the 2nd of each month at 14:00 UTC. You can also trigger it by hand and change `lookback_months`.
+8. In Tableau Public, connect a data source to each Sheet tab and publish.
+
+Other scripts that help when something looks wrong.
+
+| Script | Use |
+|---|---|
+| `scripts/check_sheet.py` | Tests the Google Sheet connection and says what is wrong |
+| `scripts/publish_sheet.py` | Rewrites the Sheet from BigQuery without calling EIA |
+| `scripts/diagnose_rto.py` | Inspects the raw demand rows and runs the demand staging step |
+
+---
+
+## Cost
+
+Everything runs inside free tiers.
+
+- BigQuery gives 10 GB of storage and 1 TB of queries a month. Load jobs are free. Every query has a 50 GB billing cap (`BQ_MAX_BYTES_BILLED`).
+- A billing account must be linked to the project. BigQuery's no-billing sandbox blocks `MERGE` and `TRUNCATE` and deletes tables after 60 days.
+- S3 holds a few hundred MB of compressed JSON.
+- Tableau Public, Google Sheets and local Airflow cost nothing.
+
+---
+
+## Design decisions
+
+- **Snowflake to BigQuery.** The first version ran on Snowflake. The warehouse cost too much for a side project, so it moved to BigQuery's free tier. The Snowflake code is in `legacy/`.
+- **One DAG.** The first version had separate ingest and transform DAGs started an hour apart. One DAG with ordered tasks removes the timing gap.
+- **Demand series filter.** The first version averaged all four EIA demand series into one number. The current version keeps only demand, which changed the demand charts.
+- **Google Sheet as the bridge.** Tableau Public has no database connector. The Sheet is the only source it refreshes on its own, so the tables written there are sized to fit.
+
+---
+
+## Known limits
+
+- Airflow runs on a laptop, so a run only happens while Docker is up. If the laptop is off on the scheduled day, the missed run starts the next time Docker starts.
+- Retail and generation data lag by about two months, so the newest months on the dashboard are behind.
+- EIA demand readings sometimes include odd values, such as negative averages or very large peaks. The pipeline does not clean them.
+- Some rows are national or regional totals rather than states, such as `US` and a few generation location codes. The state maps ignore them.
+- Airflow does not send failure alerts. Check the UI or run `python -m scripts.check_all`.
+
+---
+
+## Project structure
 
 ```
-eia-energy-pipeline/
-├── dags/
-│   ├── eia_ingest_dag.py       # pulls EIA API -> S3 daily at 02:00 UTC
-│   └── eia_transform_dag.py    # S3 -> Snowflake RAW -> STAGING -> MARTS daily at 03:00 UTC
-├── src/
-│   ├── eia_client.py           # EIA API wrapper
-│   └── s3_client.py            # boto3 wrapper
-├── sql/
-│   ├── raw/create_raw_tables.sql
-│   ├── staging/
-│   │   ├── transform_retail_prices.sql
-│   │   ├── transform_generation.sql
-│   │   └── transform_rto_demand.sql
-│   └── marts/create_marts.sql
-├── backfill.py                 # loads 2020-2024 historical data
-├── backfill_2025.py            # loads 2025-2026 data
-├── backfill_rto.py             # RTO demand backfill (parallel, quarter by quarter)
-├── run_transforms.py           # reruns staging + marts transforms manually
-├── docker-compose.yml
-├── requirements.txt
-└── .env.example
+dags/eia_pipeline_dag.py       # monthly DAG
+src/
+  eia_client.py                # EIA API client with retries
+  s3_client.py                 # S3 read and write
+  bq_client.py                 # BigQuery helper
+  pipeline.py                  # steps shared by the DAG and the scripts
+  sheets_export.py             # writes the Google Sheet
+sql/bigquery/
+  00_create_tables.sql
+  staging/                     # RAW to STAGING merges
+  marts/create_marts.sql
+scripts/                       # run, rebuild, check and publish helpers
+docs/dashboard.png
+Dockerfile, docker-compose.yml
+legacy/                        # the Snowflake version
 ```
 
----
+## Environment variables
 
-## Snowflake Schema
+See `.env.example` for the full list. The main ones are `EIA_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `GCP_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS` and `SHEET_ID`.
 
-The database is `EIA_ENERGY` with three schemas.
+## License
 
-**RAW** holds raw JSON payloads exactly as they come from the EIA API. Each row is one API record stored as a JSON string in a PAYLOAD column.
-
-**STAGING** flattens the JSON into typed columns using `PARSE_JSON()` and deduplicates via MERGE statements. This is where field name corrections and type casting happen.
-
-**MARTS** is what Tableau reads. These are fully aggregated, analytics-ready tables:
-
-- `FACT_RETAIL_PRICES` includes 12-month rolling z-scores and an is_anomaly flag for prices more than 2.5 standard deviations from the rolling mean
-- `FACT_GENERATION` maps individual fuel type codes to 7 categories (Natural Gas, Wind, Solar & Geothermal, Nuclear, Coal, Hydro, Other) and excludes aggregate codes that would double-count generation
-- `FACT_RTO_HEATMAP` aggregates hourly demand to average by hour of day and month for the heatmap chart
-- `FACT_RTO_REGIONAL` aggregates to monthly average and peak demand per grid region
-- `FACT_ANOMALY_LEADERBOARD` counts anomaly events per state
-- `DIM_STATE` is a simple state lookup table
-
----
-
-## Airflow DAGs
-
-The ingest DAG runs at 02:00 UTC and pulls the current month from all three EIA endpoints, compressing and uploading to S3.
-
-The transform DAG runs at 03:00 UTC and has four tasks in sequence: truncate RAW tables, load from S3, run staging MERGE transforms, rebuild MARTS. The truncate step is important because the MERGE statements will throw a duplicate row error if RAW contains multiple records for the same key.
-
----
-
-## Tableau Dashboard
-
-The dashboard has 8 charts:
-
-1. **US Price Map** - choropleth showing average electricity price by state, filterable by year and sector. Click any state to filter the entire dashboard.
-2. **Electricity Price Anomalies** - z-score line chart showing when prices spiked beyond normal ranges. Texas 2021 and Washington 2024 are the most visible anomalies.
-3. **Sales per Customer** - LOD calculated field showing monthly electricity spend per customer nationally over time. (built but not included in the final dashboard)
-4. **Energy Mix by State** - stacked area chart showing the share of generation by fuel category over time, filterable by state.
-5. **Fossil vs Renewable Generation** - two-line chart showing the national share of fossil vs renewable generation from 2020 to 2026. Renewables crossed fossil share in 2025.
-6. **Anomalies per State Map** - choropleth of how many price anomaly events each state had. Oregon and Vermont lead.
-7. **Demand Heatmap** - 24x12 grid showing average grid demand by hour of day and month for the contiguous US. Summer afternoons are the peak.
-8. **Regional Demand Comparison** - horizontal bar chart comparing average demand across the 7 major grid operators. PJM is by far the largest.
-
----
-
-## Setup
-
-**Prerequisites**: Python 3.11, Docker, an EIA API key, an AWS account with S3, a Snowflake account.
-
-1. Clone the repo
-2. Copy `.env.example` to `.env` and fill in your credentials
-3. Start Airflow: `docker-compose up -d`
-4. Run the Snowflake setup SQL in `sql/raw/` and `sql/staging/`
-5. Run `python backfill.py` to load 2020-2024 historical data (takes 10-15 minutes)
-6. Run `python backfill_2025.py` to extend to 2026
-7. Run `python backfill_rto.py` for RTO demand history (runs in parallel, takes 15-20 minutes)
-8. The daily DAGs will keep everything current from there
-
----
-
-## Environment Variables
-
-```
-EIA_API_KEY=
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
-AWS_REGION=us-east-1
-S3_BUCKET=
-SF_ACCOUNT=
-SF_USER=
-SF_PASSWORD=
-SF_WAREHOUSE=
-SNOWFLAKE_DATABASE=EIA_ENERGY
-```
-
----
-
-## Notes
-
-The EIA API requires parameters to be passed as a list of tuples rather than a dict when using repeated keys like `data[]`. All endpoints need a `/data` suffix. The `_get()` method in `eia_client.py` handles this.
-
-Generation data has many aggregate fuel type codes (ALL, FOS, REN, etc.) that sum up the individual codes. These are excluded from MARTS to avoid double counting. The blacklist is in `create_marts.sql`.
-
-RTO demand data is hourly and large. The backfill script fetches 4 quarters in parallel using `ThreadPoolExecutor` to speed things up. Even so, expect around 15 million rows total after the full backfill.
+See `LICENSE`.

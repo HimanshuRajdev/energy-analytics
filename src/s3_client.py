@@ -64,3 +64,14 @@ class S3Client:
             raise
 
         return key
+
+    def read_json(self, dataset: str, year: str, month: str):
+        """Return the records stored for one month, or None if the file does not exist."""
+        key = f"raw/{dataset}/year={year}/month={month}/data.json.gz"
+        try:
+            obj = self.client.get_object(Bucket=self.bucket, Key=key)
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                return None
+            raise
+        return json.loads(gzip.decompress(obj["Body"].read()))

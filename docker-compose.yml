@@ -1,30 +1,31 @@
+# Airflow for the EIA pipeline, run locally.
+
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.9.1
+  build: .
+  image: eia-airflow:latest
+  env_file: .env              # EIA, AWS, GCP settings live here, never in git
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CORE__FERNET_KEY: ''
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'   # run unattended after deploy
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
-    # Pass your secrets into every Airflow container from your .env file
-    EIA_API_KEY: ${EIA_API_KEY}
-    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-    AWS_REGION: ${AWS_REGION}
-    S3_BUCKET: ${S3_BUCKET}
-    SF_ACCOUNT: ${SF_ACCOUNT}
-    SF_USER: ${SF_USER}
-    SF_PASSWORD: ${SF_PASSWORD}
-    SF_WAREHOUSE: ${SF_WAREHOUSE}
-    SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE}
-    _PIP_ADDITIONAL_REQUIREMENTS: "snowflake-connector-python boto3"
+    AIRFLOW__CORE__PARALLELISM: '4'
+    AIRFLOW__WEBSERVER__WORKERS: '1'
+    AIRFLOW__SCHEDULER__PARSING_PROCESSES: '1'
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: '60'
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: '120'
+    PYTHONPATH: /opt/airflow
+    # Inside the container the key lives here. This overrides the path in .env, which is for running scripts on Windows.
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp.json
   volumes:
-    - ./dags:/opt/airflow/dags          # your DAG files
-    - ./src:/opt/airflow/src            # eia_client.py, s3_client.py
-    - ./sql:/opt/airflow/sql            # SQL transform scripts
-    - ./logs:/opt/airflow/logs          # task logs
-    - ./plugins:/opt/airflow/plugins    # custom operators (empty for now)
+    - ./dags:/opt/airflow/dags
+    - ./src:/opt/airflow/src
+    - ./sql:/opt/airflow/sql
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./secrets:/opt/airflow/secrets:ro   # GCP service account key
   depends_on:
     postgres:
       condition: service_healthy
@@ -43,23 +44,30 @@ services:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 5s
       retries: 5
+    restart: always
 
   airflow-init:
     <<: *airflow-common
-    command: bash -c "airflow db migrate && airflow users create --username admin --password admin --firstname Himanshu --lastname Rajdev --role Admin --email hrajdev@wisc.edu"
-    restart: "no"   # runs once and exits
+    command: bash -c "airflow db migrate && airflow users create --username admin --password \"$${AIRFLOW_ADMIN_PASSWORD}\" --firstname Himanshu --lastname Rajdev --role Admin --email hrajdev@wisc.edu"
+    restart: "no"
 
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
     restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
 
   airflow-webserver:
     <<: *airflow-common
     command: webserver
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"   # http://localhost:8080
     restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 30s

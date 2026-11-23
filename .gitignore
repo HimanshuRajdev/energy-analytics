@@ -29,3 +29,9 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Secrets and keys
+secrets/*
+!secrets/.gitkeep
+*.json.key
+tableau_data/

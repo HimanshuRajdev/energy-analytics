@@ -27,9 +27,22 @@ class EIAClient:
         are preserved correctly by requests.
         """
         full_params = list(params) + [("api_key", self.api_key)]
-        response = self.session.get(f"{self.BASE_URL}{endpoint}", params=full_params)
-        response.raise_for_status()  # raises HTTPError on 4xx/5xx
-        return response.json()
+        # EIA sometimes drops connections on big pulls, so retry with a growing wait
+        for attempt in range(6):
+            try:
+                response = self.session.get(
+                    f"{self.BASE_URL}{endpoint}", params=full_params, timeout=90
+                )
+                if response.status_code in (429, 500, 502, 503, 504):
+                    raise requests.exceptions.ConnectionError(f"HTTP {response.status_code}")
+                response.raise_for_status()  # raises HTTPError on other 4xx
+                return response.json()
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if attempt == 5:
+                    raise
+                wait = 5 * 2 ** attempt
+                logger.warning("EIA request failed (%s). Retrying in %ds", e, wait)
+                time.sleep(wait)
     
     def _paginate(self, endpoint: str, params: list) -> List[Dict]:
         all_records = []
@@ -88,6 +101,7 @@ class EIAClient:
         params = [
             ("frequency", "hourly"),
             ("data[]", "value"),
+            ("facets[type][]", "D"),   # demand only, skips forecast, net generation and interchange
             ("start", start),
             ("end", end),
             ("sort[0][column]", "period"),
